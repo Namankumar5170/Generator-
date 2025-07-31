@@ -1,131 +1,108 @@
-import requests, re, subprocess, os, urllib3, datetime, threading, time, platform
+import requests, re, os, urllib3, datetime, threading, time
 from bs4 import BeautifulSoup
-from colorama import Fore
+from colorama import Fore, init
 from pathvalidate import sanitize_filename
 
-# Disable SSL warnings
+init(autoreset=True)
 urllib3.disable_warnings()
 
-# Global variables
+agent = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36'}
 e = datetime.datetime.now()
 current_date = e.strftime("%Y-%m-%d-%H-%M-%S")
-agent = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36'}
-pages = 0
 scraped = 0
+output_file = f'combos/scrapedcombos-{current_date}.txt'
 
-class leech():
-    def save(output, thread, host, alr=False):
-        global scraped
-        if not alr:
-            filtered = [line.strip() for line in output.split('\n')
-                        if re.compile(r'([^\s|]+[@][^\s|]+[.][^\s|]+[:][^\s|]+)').match(line.strip())
-                        and len(line.strip()) <= 64 and line.strip()]
-        else:
-            filtered = output
+if not os.path.exists("combos"):
+    os.makedirs("combos/")
 
-        filtered = [f"{line.split(':')[-2]}:{line.split(':')[-1]}" if line.startswith("http") else line for line in filtered]
-        scraped += len(filtered)
-        print(Fore.GREEN + f"Scraped [{len(filtered)}] from [{thread}] at [{host}]")
-        open(f'combos/scrapedcombos-{current_date}.txt', 'a', encoding='utf-8').write('\n'.join(map(str, filtered)) + "\n")
+lock = threading.Lock()
 
-    def gofile(link, thread, content_id=None):
-        try:
-            if content_id:
-                token = requests.post("https://api.gofile.io/accounts").json()["data"]["token"]
-                wt = requests.get("https://gofile.io/dist/js/alljs.js").text.split('wt: "')[1].split('"')[0]
-                data = requests.get(
-                    f"https://api.gofile.io/contents/{content_id}?wt={wt}&cache=true",
-                    headers={"Authorization": "Bearer " + token}
-                ).json()
-                if data["status"] == "ok" and data["data"].get("passwordStatus", "passwordOk") == "passwordOk":
-                    dir = os.path.join(link, sanitize_filename(data["data"]["name"]))
-                    if data["data"]["type"] == "folder":
-                        for cid in data["data"]["childrenIds"]:
-                            child = data["data"]["children"][cid]
-                            if child["type"] == "folder":
-                                leech.gofile(dir, thread, content_id=cid)
-                            else:
-                                leech.save(requests.get(child["link"], headers={"Cookie": f"accountToken={token}"}).text, thread, "gofile.io")
-                    else:
-                        leech.save(requests.get(data["data"]["link"], headers={"Cookie": f"accountToken={token}"}).text, thread, "gofile.io")
-            else:
-                leech.gofile(link, thread, link.split("/")[-1])
-        except:
-            pass
+def save_combos(data, source):
+    global scraped
+    filtered = [line.strip() for line in data if ':' in line and len(line.strip()) <= 64]
+    scraped += len(filtered)
 
-    def handle(link, thread):
-        try:
-            if link.startswith('https://www.upload.ee/files/'):
-                f = BeautifulSoup(requests.get(link, headers=agent).text, 'html.parser')
-                dlink = f.find('a', id='d_l').get('href')
-                leech.save(requests.get(dlink, headers=agent).text, thread, "upload.ee")
+    with lock:
+        with open(output_file, 'a', encoding='utf-8') as f:
+            f.write(f"\n=== Source: {source} ===\n")
+            for line in filtered:
+                f.write(f"{line}\n")
+    print(Fore.GREEN + f"[+] Scraped {len(filtered)} from {source}")
 
-            elif link.startswith('https://www.mediafire.com/file/'):
-                f = BeautifulSoup(requests.get(link, headers=agent).text, 'html.parser')
-                dlink = f.find('a', id='downloadButton').get('href')
-                leech.save(requests.get(dlink, headers=agent).text, thread, "mediafire.com")
-
-            elif link.startswith('https://pixeldrain.com/u/'):
-                leech.save(requests.get(link.replace("/u/", "/api/file/") + "?download", headers=agent).text, thread, "pixeldrain.com")
-
-            elif link.startswith('https://mega.nz/file/'):
-                if platform.system() == "Windows" and os.path.exists("megatools\\megatools.exe"):
-                    process = subprocess.Popen(f"megatools\\megatools.exe dl {link} --no-ask-password --print-names", shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True)
-                    output = process.stdout.readlines()
-                    process.wait()
-                    if output:
-                        saved = output[-1].strip()
-                        with open(saved, 'r', encoding='utf-8') as f:
-                            leech.save(f.read(), thread, "mega.nz")
-                        os.remove(saved)
-                else:
-                    print(Fore.RED + "MEGA link skipped (megatools not available on this platform)")
-
-            elif link.startswith('https://www.sendspace.com/file/'):
-                soup = BeautifulSoup(requests.get(link, headers=agent).text, 'html.parser')
-                download_link = soup.find('a', {'id': 'download_button'})['href']
-                leech.save(requests.get(download_link, verify=False, headers=agent).text, thread, "sendspace.com")
-
-            elif link.startswith('https://gofile.io/d/'):
-                leech.gofile(link, thread)
-
-        except Exception as e:
-            print(Fore.RED + f"[handle] Error: {e}")
-
-def title():
+def get_links_from_forum(url, base, tag='a', class_name=None):
+    links = []
     try:
-        import sys
-        sys.stdout.write(f"\33]0;Combo Scraper by KillinMachine | Scraped: {scraped}\a")
-        sys.stdout.flush()
-    except:
-        pass
-    time.sleep(1)
-    threading.Thread(target=title).start()
+        page = requests.get(url, headers=agent, timeout=10)
+        soup = BeautifulSoup(page.text, 'html.parser')
+        elements = soup.find_all(tag, class_=class_name) if class_name else soup.find_all(tag)
+        for a in elements:
+            href = a.get('href')
+            if href and "/threads/" in href or "/topic/" in href:
+                full_link = href if href.startswith("http") else base + href
+                if full_link not in links:
+                    links.append(full_link)
+    except Exception as e:
+        print(Fore.RED + f"[!] Error fetching links from {url}: {e}")
+    return links
+
+def extract_and_save_from_page(url, source):
+    try:
+        page = requests.get(url, headers=agent, timeout=10)
+        soup = BeautifulSoup(page.text, 'html.parser')
+        text_blocks = soup.find_all(text=re.compile(r'.+:.+'))
+        lines = [line.strip() for line in text_blocks if ':' in line]
+        save_combos(lines, source)
+    except Exception as e:
+        print(Fore.RED + f"[!] Error parsing page {url}: {e}")
+
+def scrape_source(name, forum_url, base_url):
+    print(Fore.CYAN + f"[~] Scraping {name}")
+    links = get_links_from_forum(forum_url, base_url)
+    for link in links[:5]:  # max 5 per site to limit overload
+        extract_and_save_from_page(link, name)
+
+def pastefo():
+    print(Fore.CYAN + "[~] Scraping paste.fo")
+    try:
+        for page in range(1, 3):
+            req = requests.get(f"https://paste.fo/recent/{page}", timeout=10)
+            soup = BeautifulSoup(req.text, 'html.parser')
+            tables = soup.find_all('tr', class_=False)
+            for table in tables:
+                a_tags = table.find_all('a')
+                for a in a_tags:
+                    link = f"https://paste.fo/raw{a.get('href')}"
+                    try:
+                        data = requests.get(link, timeout=10).text.splitlines()
+                        if data:
+                            save_combos(data, "paste.fo")
+                    except: pass
+    except Exception as e:
+        print(Fore.RED + f"[!] paste.fo error: {e}")
 
 def start():
-    global pages
-    print(Fore.CYAN + "Combo Scraper by KillinMachine")
-    pages = int(input(Fore.LIGHTGREEN_EX + "Pages to Scrape: ")) + 1
-    if not os.path.exists("combos"):
-        os.makedirs("combos/")
-    title()
+    print(Fore.MAGENTA + "⚡ Combo Scraper Started ⚡\n")
 
-    # TODO: Add back actual scraping functions (like leech.heypass) here
-    # Right now, we are only testing handle manually
-    functions = [
-        # Example: lambda: leech.handle("https://example.com/download.txt", "Manual")
+    threads = [
+        threading.Thread(target=scrape_source, args=("heypass.net", "https://heypass.net/forums/combo-lists.69/", "https://heypass.net")),
+        threading.Thread(target=scrape_source, args=("nohide.space", "https://nohide.space/forums/free-email-pass.3/", "https://nohide.space")),
+        threading.Thread(target=scrape_source, args=("nulled.to", "https://www.nulled.to/forum/74-combolists/", "https://www.nulled.to")),
+        threading.Thread(target=scrape_source, args=("crackingx.com", "https://crackingx.com/forums/5/", "https://crackingx.com")),
+        threading.Thread(target=scrape_source, args=("leaks.ro", "https://www.leaks.ro/forum/308-combolists/", "https://www.leaks.ro")),
+        threading.Thread(target=scrape_source, args=("hellofhackers.com", "https://hellofhackers.com/forums/combolists.18/", "https://hellofhackers.com")),
+        threading.Thread(target=scrape_source, args=("crackingpro.com", "https://www.crackingpro.com/forum/23-combos/", "https://www.crackingpro.com")),
+        threading.Thread(target=pastefo)
     ]
 
-    threads = []
-    for func in functions:
-        thread = threading.Thread(target=func)
-        thread.start()
-        threads.append(thread)
+    for t in threads:
+        t.start()
 
-    for thread in threads:
-        thread.join()
+    for t in threads:
+        t.join()
 
-    print(Fore.YELLOW + f"Scraped [{scraped}] combos from [{len(functions) * pages}] pages.")
+    print(Fore.YELLOW + f"\n✅ Done! Scraped total: {scraped} combos.")
+    print(Fore.GREEN + f"📁 Saved to: {output_file}")
     input("Press Enter to exit...")
 
-start()
+if __name__ == "__main__":
+    start()
